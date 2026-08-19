@@ -25,8 +25,6 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: "󰊗"
-    slotSize: Style.bar.statusSlot
-    fontSize: Style.font.caption
     tooltipText: "Tiling Trainer — learn the window keys by playing"
     onPressed: root.launch()
   }
