@@ -1,0 +1,3 @@
+#!/bin/bash
+# Launch the Omarchy Tiling Trainer in a fresh terminal window.
+exec omarchy launch terminal python3 "$(dirname "$(readlink -f "$0")")/tiling-game.py"
