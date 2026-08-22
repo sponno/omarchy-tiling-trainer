@@ -4,7 +4,7 @@ Omarchy Tiling Trainer — an interactive game for learning Hyprland/Omarchy
 window management. Run it in a terminal; it watches the REAL window manager
 via `hyprctl` and ticks off missions as you perform them with the real keys.
 
-Controls inside the game:  h = show/hide hint   n = skip level   q = quit
+Controls inside the game:  h = show/hide hint   n = skip level   b = back a level   q = quit
 """
 import json, os, select, shutil, subprocess, sys, termios, time, tty
 
@@ -32,6 +32,7 @@ class State:
     def __init__(self):
         self.clients  = [cl for cl in (hypr("clients") or []) if cl.get("mapped", True)]
         self.monitors = hypr("monitors") or []
+        self.workspaces = hypr("workspaces") or []
         aw = hypr("activewindow") or {}
         self.active = aw.get("address")
         foc = next((m for m in self.monitors if m.get("focused")), self.monitors[0] if self.monitors else {})
@@ -40,6 +41,8 @@ class State:
         self.by_addr = {cl["address"]: cl for cl in self.clients}
     def on_ws(self, ws):  return [cl for cl in self.clients if cl["workspace"]["id"] == ws]
     def get(self, addr):  return self.by_addr.get(addr)
+    def layout_of(self, ws):
+        return next((w.get("tiledLayout") for w in self.workspaces if w.get("id") == ws), None)
 
 def find_self_address():
     """Walk up our parent processes until we hit one that owns a Hyprland window.
@@ -114,6 +117,7 @@ def render_map(st, arena, me, width, height):
         if w.get("floating"): tags.append("floating")
         if w.get("fullscreen"): tags.append("FULLSCREEN")
         if w.get("pinned"): tags.append("pinned")
+        if len(w.get("grouped") or []) >= 2: tags.append("grouped")
         text = (lab + ("  ["+", ".join(tags)+"]" if tags else ""))[:max(0, x1-x0-1)]
         ly = y0 + 1 if y1 - y0 >= 2 else y0
         for i, ch in enumerate(text):
@@ -173,6 +177,21 @@ def build_levels(ctx):
         f"{keys('SUPER','RETURN')} again.",
         lambda st: (track(st), len(others(st)) >= 2)[1]))
 
+    # 3b ------------------------------------------------------------------
+    def cycle_setup(st): ctx["cseen"] = set()
+    def cycle_check(st):
+        here = {w["address"] for w in st.on_ws(arena)}
+        ctx["cseen"] = (ctx["cseen"] & here) | ({st.active} if st.active in here else set())
+        ctx["note"] = f"visited {len(ctx['cseen'])}/{max(3, len(here))} windows"
+        return len(ctx["cseen"]) >= max(3, len(here))
+    L.append(Level("Do a lap",
+        "Directions are great when you can see the target — but ALT+TAB just\n"
+        "cycles to the next window, no thinking required. Do a full lap:\n"
+        "visit every window on this workspace.",
+        f"{keys('ALT','TAB')} focuses the next window ({keys('SHIFT','ALT','TAB')} = previous).\n"
+        "  It also raises the window on top if something overlaps it.",
+        cycle_check, setup=cycle_setup))
+
     # 4 ------------------------------------------------------------------
     def snap_sizes(st): ctx["sizes"] = {w["address"]: tuple(w["size"]) for w in tiled(st)}
     def size_changed(st):
@@ -211,6 +230,63 @@ def build_levels(ctx):
         f"  add ALT for a little, CTRL for a lot.  Or {keys('SUPER','right-drag')}.",
         resized, setup=snap_sizes))
 
+    # 6b ------------------------------------------------------------------
+    WIDTH_DIR = os.path.expanduser("~/.local/state/omarchy/windows")
+    def width_setup(st):
+        ctx["wphase"], ctx["wt0"], ctx["waddr"], ctx["w0"] = 0, time.time(), None, 0
+    def width_check(st):
+        if ctx["wphase"] == 0:
+            try:
+                newest = max((os.path.getmtime(os.path.join(WIDTH_DIR, f))
+                              for f in os.listdir(WIDTH_DIR)), default=0)
+            except OSError:
+                newest = 0
+            w = st.get(st.active)
+            if newest > ctx["wt0"] and w and not w.get("floating"):
+                ctx["wphase"], ctx["waddr"], ctx["w0"] = 1, w["address"], w["size"][0]
+                ctx["note"] = "1/3 width saved ✓ — now change the width"
+            return False
+        w = st.get(ctx["waddr"])
+        if not w or w.get("floating"): return False
+        if ctx["wphase"] == 1:
+            if abs(w["size"][0] - ctx["w0"]) > 15:
+                ctx["wphase"] = 2; ctx["note"] = "2/3 resized ✓ — now restore the saved width"
+            return False
+        return abs(w["size"][0] - ctx["w0"]) <= 15
+    L.append(Level("Save & restore width",
+        "Found a width you like? Omarchy can remember it. Three steps, all on\n"
+        "one tiled window: SAVE its width, mess the width up, then RESTORE it.",
+        f"{keys('SUPER','ALT','HOME')} saves.  {keys('SUPER','MINUS')} / {keys('SUPER','EQUAL')} to mess it up.  {keys('SUPER','HOME')} restores.",
+        width_check, setup=width_setup))
+
+    # 6c ------------------------------------------------------------------
+    def pseudo_check(st):
+        w = st.get(st.active)
+        if not w or w.get("floating") or w.get("fullscreen"): return False
+        old = ctx["sizes"].get(w["address"])
+        if not old: return False
+        others_same = all(tuple(o["size"]) == ctx["sizes"].get(o["address"], tuple(o["size"]))
+                          for o in tiled(st) if o["address"] != w["address"])
+        if others_same and (abs(w["size"][0]-old[0]) > 15 or abs(w["size"][1]-old[1]) > 15):
+            ctx["paddr"] = w["address"]; return True
+        return False
+    L.append(Level("Pseudo-size it",
+        "A PSEUDO window stays in its tile but shrinks to its natural size —\n"
+        "the layout doesn't move, only that window does. Try it on a terminal.\n"
+        "(If nothing changes, its natural size already fills the tile — press n.)",
+        f"{keys('SUPER','P')} toggles pseudo on the focused window.",
+        pseudo_check, setup=snap_sizes, boss=False))
+    def pseudo_back(st):
+        if not ctx.get("paddr"): return True   # previous level skipped: nothing to undo
+        w = st.get(ctx["paddr"])
+        old = ctx["sizes"].get(ctx["paddr"])
+        if not w or not old: return True       # window gone
+        return abs(w["size"][0]-old[0]) <= 15 and abs(w["size"][1]-old[1]) <= 15
+    L.append(Level("...and un-pseudo",
+        "It's a toggle — fill the tile again.",
+        f"{keys('SUPER','P')} again on the same window.",
+        pseudo_back, boss=False))
+
     # 7 ------------------------------------------------------------------
     L.append(Level("Go fullscreen (on me)",
         "Any window can go fullscreen. Make THIS tutorial window fullscreen so\n"
@@ -236,6 +312,50 @@ def build_levels(ctx):
         f"{keys('SUPER','T')} on the floating window.",
         lambda st: not any(w.get("floating") for w in st.on_ws(arena)), boss=False))
 
+    # 8b — groups ---------------------------------------------------------
+    def grouped_wins(st): return [w for w in st.on_ws(arena) if len(w.get("grouped") or []) >= 2]
+    L.append(Level("Group up",
+        "Windows can be GROUPED into one tile with tabs — like browser tabs,\n"
+        "but for any windows. Turn a terminal into a group, then shove its\n"
+        "neighbour in with it.",
+        f"{keys('SUPER','G')} makes the focused window a group.  Then focus a neighbour\n"
+        f"  and {keys('SUPER','ALT','←/→/↑/↓')} moves it INTO the group in that direction.",
+        lambda st: bool(grouped_wins(st))))
+
+    def gcycle_setup(st): ctx["gseen"] = set()
+    def gcycle(st):
+        w = st.get(st.active)
+        if w and len(w.get("grouped") or []) >= 2:
+            ctx["gseen"].add(w["address"])
+            ctx["note"] = f"visited {len(ctx['gseen'])}/2 tabs"
+        return len(ctx["gseen"]) >= 2
+    L.append(Level("Ride the tabs",
+        "The group shows a tab bar on top. Cycle through it — visit both\n"
+        "windows in the group.",
+        f"{keys('SUPER','ALT','TAB')} next tab, {keys('SUPER','SHIFT','ALT','TAB')} previous.\n"
+        f"  (Also {keys('SUPER','CTRL','←/→')}, or {keys('SUPER','ALT','1..5')} jumps straight to a tab)",
+        gcycle, setup=gcycle_setup))
+
+    L.append(Level("Break up the band",
+        "Groups dissolve as easily as they form. Ungroup everything on this\n"
+        "workspace.",
+        f"{keys('SUPER','ALT','G')} pops the focused window out.  Or {keys('SUPER','G')} on the group dissolves it.",
+        lambda st: not grouped_wins(st), boss=False))
+
+    # 8c — scrolling layout ------------------------------------------------
+    L.append(Level("Shift into scroll",
+        "Every workspace has a LAYOUT. So far you've played 'dwindle' (the\n"
+        "splitting you know). The other is 'scrolling': windows line up on an\n"
+        "endless horizontal strip you scroll along. Switch this workspace.",
+        f"{keys('SUPER','L')} toggles the workspace layout.",
+        lambda st: st.layout_of(arena) == "scrolling"))
+
+    L.append(Level("...and back to dwindle",
+        "Scroll around if you like — focus keys slide the strip. Then bring\n"
+        "this workspace back to dwindle.",
+        f"{keys('SUPER','L')} again.",
+        lambda st: st.layout_of(arena) == "dwindle"))
+
     # 9 ------------------------------------------------------------------
     def ws_trip(st):
         if st.ws == trip: ctx["visited"] = True
@@ -246,6 +366,34 @@ def build_levels(ctx):
         f"Go to workspace {T} (it's empty), then come back here to {A}.",
         f"{keys('SUPER',T)} then {keys('SUPER',A)}.   (Also {keys('SUPER','TAB')} next / {keys('SUPER','SHIFT','TAB')} previous)",
         ws_trip, setup=ws_setup))
+
+    # 9b -------------------------------------------------------------------
+    def boom_setup(st): ctx["b_visited"] = False
+    def boom(st):
+        if st.ws != arena: ctx["b_visited"] = True
+        return ctx.get("b_visited") and st.ws == arena
+    L.append(Level("Boomerang",
+        f"Hyprland remembers your FORMER workspace. Hop anywhere (say {T}),\n"
+        "then snap straight back without thinking about numbers.",
+        f"{keys('SUPER',T)} then {keys('SUPER','CTRL','TAB')} returns to the former workspace.\n"
+        f"  (Also {keys('SUPER','scroll-wheel')} rolls through workspaces in order.)",
+        boom, setup=boom_setup))
+
+    # 9c -------------------------------------------------------------------
+    if len(hypr("monitors") or []) > 1:
+        def mon_setup(st):
+            foc = next((m for m in st.monitors if m.get("focused")), {})
+            ctx["mon0"], ctx["mon_away"] = foc.get("id"), False
+        def mon_check(st):
+            foc = next((m for m in st.monitors if m.get("focused")), {})
+            if foc.get("id") != ctx.get("mon0"): ctx["mon_away"] = True
+            return ctx.get("mon_away") and foc.get("id") == ctx.get("mon0")
+        L.append(Level("Second screen",
+            "You have more than one monitor — focus hops between them too.\n"
+            "Visit the other monitor, then come back here.",
+            f"{keys('CTRL','ALT','TAB')} focuses the next monitor ({keys('SHIFT','CTRL','ALT','TAB')} previous).\n"
+            f"  ({keys('SUPER','SHIFT','ALT','←/→/↑/↓')} moves a whole WORKSPACE between monitors)",
+            mon_check, setup=mon_setup))
 
     # 10 -----------------------------------------------------------------
     def shipped(st):
@@ -264,7 +412,11 @@ def build_levels(ctx):
 
     # 11 -----------------------------------------------------------------
     def stashed(st):
-        return any(st.get(a) and st.get(a)["workspace"]["id"] < 0 for a in ctx["spawned"])
+        for a in ctx["spawned"]:
+            w = st.get(a)
+            if w and w["workspace"]["id"] < 0:
+                ctx["stash_addr"] = a; return True
+        return False
     L.append(Level("Stash in the scratchpad",
         "The scratchpad is a hidden workspace you can pop over the top of any\n"
         "workspace — great for a music player or notes. Focus a terminal here\n"
@@ -280,12 +432,42 @@ def build_levels(ctx):
         f"{keys('SUPER','S')} toggles the scratchpad (press twice).",
         toggled, setup=lambda st: ctx.__setitem__("shown", False), boss=False))
 
+    def unstash_check(st):
+        a = ctx.get("stash_addr")
+        w = st.get(a) if a else None
+        if w: return w["workspace"]["id"] == arena
+        return any(st.get(x) and st.get(x)["workspace"]["id"] == arena for x in ctx["spawned"])
+    L.append(Level("...and unstash it",
+        "Here's the trap: SUPER+S only HIDES the scratchpad — the window still\n"
+        "LIVES there. To truly bring one back, move it onto a real workspace\n"
+        "like any other window. Rescue the stashed terminal: bring it back here.",
+        f"{keys('SUPER','S')} to show it, focus it, then {keys('SUPER','SHIFT',A)} moves it back to this workspace.",
+        unstash_check))
+
+    # 11b -----------------------------------------------------------------
+    def gaps_css():
+        return (hypr("getoption", "general:gaps_in") or {}).get("css")
+    def gaps_setup(st): ctx["gaps0"], ctx["gaps_flipped"] = gaps_css(), False
+    def gaps_check(st):
+        if ctx["gaps0"] is None: return True   # can't read the option: don't block
+        cur = gaps_css()
+        if cur != ctx["gaps0"]:
+            ctx["gaps_flipped"] = True; ctx["note"] = "gaps toggled ✓ — now bring them back"
+        return ctx["gaps_flipped"] and cur == ctx["gaps0"]
+    L.append(Level("Mind the gaps",
+        "Looks are toggleable too. Kill the gaps between tiles for maximum\n"
+        "screen estate, then bring them back.\n"
+        "(Related: SUPER+BACKSPACE toggles window transparency, and\n"
+        "SUPER+CTRL+BACKSPACE makes a lone window square.)",
+        f"{keys('SUPER','SHIFT','BACKSPACE')} toggles window gaps (press twice).",
+        gaps_check, setup=gaps_setup))
+
     # 12 -----------------------------------------------------------------
     def cleaned(st):
         return not others(st) and not any(st.get(a) for a in ctx["spawned"])
     L.append(Level("Clean up",
-        f"Close every window you opened: the ones here, the one on workspace {T},\n"
-        "and the one in the scratchpad (SUPER+S to show it, focus it, close it).\n"
+        f"Close every window you opened: the ones here and the one on workspace {T}.\n"
+        "(If anything is still stashed: SUPER+S to show it, focus it, close it.)\n"
         "Leave me alive!",
         f"{keys('SUPER','W')} closes the focused window.  ({keys('CTRL','ALT','DELETE')} closes ALL — careful!)",
         cleaned))
@@ -306,16 +488,19 @@ def draw(lines):
     sys.stdout.write(out); sys.stdout.flush()
 
 def play(levels, ctx, title, show_hints):
-    results = []
-    for i, lv in enumerate(levels):
+    results = [None] * len(levels)
+    i = 0
+    while i < len(levels):
+        lv = levels[i]
         st = State()
-        ctx["warn"] = ""
+        ctx["warn"] = ctx["note"] = ""
         if lv.setup: lv.setup(st)
-        t0 = time.time(); hint = show_hints; done = False; skipped = False
+        t0 = time.time(); hint = show_hints; done = False; skipped = False; back = False
         while True:
             k = read_key()
-            if k == "q": return results, True
+            if k == "q": return [r for r in results if r], True
             if k == "n": skipped = True; break
+            if k == "b" and i > 0: back = True; break
             if k == "h": hint = not hint
             st = State()
             if lv.check(st): done = True; break
@@ -323,7 +508,7 @@ def play(levels, ctx, title, show_hints):
             el = time.time() - t0
             head = [
                 c(f" {title} ", "white", True) + DIM + f"  level {i+1}/{len(levels)}   {el:5.1f}s   " + RESET
-                + DIM + "h=hint  n=skip  q=quit" + RESET,
+                + DIM + "h=hint  n=skip  b=back  q=quit" + RESET,
                 "",
                 c(f"▶ {lv.title}", "yellow", True),
             ] + ["  " + s for s in lv.story.split("\n")] + [""]
@@ -332,18 +517,27 @@ def play(levels, ctx, title, show_hints):
             else:
                 head += [DIM + "  (press h for a hint)" + RESET]
             if ctx.get("warn"): head += ["", c("  ⚠ " + ctx["warn"], "red", True)]
+            if ctx.get("note"): head += ["", c("  ▸ " + ctx["note"], "cyan")]
             head += ["", DIM + f"  Live map of workspace {ctx['arena']}:" + RESET]
             mh = max(8, rows - len(head) - 3)
             mw = min(cols - 4, 90)
             body = ["  " + s for s in render_map(st, ctx["arena"], ctx["me"], mw, mh)]
             draw(head + body)
             time.sleep(0.12)
+        if back:
+            i -= 1
+            continue
         el = time.time() - t0
-        results.append((lv.title, el, skipped))
-        if done:
-            draw([c(f"  ✔ {lv.title} — {el:.1f}s", "green", True), ""])
-            time.sleep(0.9)
-    return results, False
+        results[i] = (lv.title, el, skipped)
+        if not done:
+            i += 1
+            continue
+        # Quick done flash — auto-advances, with a dim recap of the keys used.
+        draw([c(f"  ✔ {lv.title} — {el:.1f}s", "green", True), ""]
+             + ["  " + DIM + "you did: " + RESET + lv.hint.split("\n")[0]])
+        time.sleep(1.4)
+        i += 1
+    return [r for r in results if r], False
 
 def main():
     if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
@@ -362,7 +556,8 @@ def main():
             time.sleep(0.4); st = State()
     used.add(arena)
     trip_ws = next((n for n in list(range(arena+1, 10)) + list(range(1, arena)) if n not in used), (arena % 9) + 1)
-    ctx = {"me": me, "arena": arena, "trip_ws": trip_ws, "spawned": set(), "sizes": {}, "pos": {}}
+    ctx = {"me": me, "arena": arena, "trip_ws": trip_ws, "spawned": set(), "sizes": {}, "pos": {},
+           "warn": "", "note": ""}
     levels = build_levels(ctx)
 
     fd = sys.stdin.fileno(); old = termios.tcgetattr(fd)

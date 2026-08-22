@@ -7,9 +7,11 @@ Tiling Trainer is a terminal game that watches the *real* window manager
 with the real keys. A live ASCII mini-map shows your tiles splitting, swapping,
 floating and fullscreening as you press them.
 
-Missions: open terminals · move focus · flip the split · swap · resize ·
-fullscreen · float · workspaces · move windows between workspaces ·
-scratchpad · close. Then a timed **boss round** with the hints hidden.
+Missions: open terminals · move focus · alt-tab lap · flip the split · swap · resize ·
+save & restore width · pseudo · fullscreen · float · window groups (tabs) ·
+scrolling layout · workspaces · former-workspace boomerang · multi-monitor
+(if you have one) · move windows between workspaces · scratchpad · gaps
+toggle · close. Then a timed **boss round** with the hints hidden.
 
 ## Install (as an Omarchy shell plugin)
 
@@ -27,7 +29,7 @@ No plugin needed — it's a single dependency-free Python file:
 
 ## In-game keys
 
-`h` hint on/off · `n` skip level · `q` quit.
+`h` hint on/off · `n` skip level · `b` back a level · `q` quit.
 Cheat sheet any time in Omarchy: **SUPER + K**.
 
 ## How it works

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.sponno.tiling-trainer",
   "name": "Tiling Trainer",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "John Ballinger",
   "license": "MIT",
   "description": "Learn Omarchy window management by playing: a terminal game that watches the real Hyprland and ticks off missions as you do them.",
