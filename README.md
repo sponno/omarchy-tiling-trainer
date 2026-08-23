@@ -22,9 +22,11 @@ A 󰊗 icon appears in your bar — click it to play. Remove with
 
 ## Or just run the script
 
-No plugin needed — it's a single dependency-free Python file:
+No plugin needed — it's a single dependency-free Python file. The URL is
+pinned to the v1.1.0 release commit, so the script you run is exactly the
+code that was reviewed:
 
-    curl -fsSL https://raw.githubusercontent.com/sponno/omarchy-tiling-trainer/main/tiling-game.py -o /tmp/tiling-game.py
+    curl -fsSL https://raw.githubusercontent.com/sponno/omarchy-tiling-trainer/dcc8f285025de24c3f6321a43231af7f8ae8bf22/tiling-game.py -o /tmp/tiling-game.py
     omarchy launch terminal python3 /tmp/tiling-game.py
 
 ## In-game keys
